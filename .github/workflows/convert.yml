@@ -1,77 +1,50 @@
 name: Convert Python to EXE
 
 on:
-
   repository_dispatch:
-
     types: [convert_file]
 
 jobs:
-
   build:
-
     runs-on: windows-latest
-
     steps:
-
     - uses: actions/checkout@v4
 
     - uses: actions/setup-python@v5
-
       with:
-
         python-version: '3.10'
 
     - name: Install deps
-
       run: |
-
         python -m pip install --upgrade pip
-
         pip install pyinstaller pycryptodome
 
     - name: Download User File
-
+      shell: pwsh
       run: |
-
-        Invoke-WebRequest -Uri "${{ github.event.client_payload.file_url }}" -OutFile "script.py"
+        Invoke-WebRequest -Uri "${{ github.event.client_payload.file_url }}" -OutFile "script.py" -ErrorAction Stop
 
     - name: Download Icon (optional)
-
+      shell: pwsh
       run: |
-
         $icon = "${{ github.event.client_payload.icon_url }}"
-
         if ($icon -and $icon.Trim() -ne "") {
-
-          Invoke-WebRequest -Uri $icon -OutFile "app.ico"
-
-          echo "HAS_ICON=1" >> $env:GITHUB_ENV
-
+          Invoke-WebRequest -Uri $icon -OutFile "app.ico" -ErrorAction Stop
+          "HAS_ICON=1" | Out-File -FilePath $env:GITHUB_ENV -Append
         } else {
-
-          echo "HAS_ICON=0" >> $env:GITHUB_ENV
-
+          "HAS_ICON=0" | Out-File -FilePath $env:GITHUB_ENV -Append
         }
 
     - name: Build EXE
-
+      shell: pwsh
       run: |
-
-        if ($env:HAS_ICON -eq "1") {
-
-          pyinstaller --onefile --noconsole --name script --clean --icon=app.ico --hidden-import=Crypto --hidden-import=Crypto.Cipher.AES script.py
-
-        } else {
-
-          pyinstaller --onefile --noconsole --name script --clean --hidden-import=Crypto --hidden-import=Crypto.Cipher.AES script.py
-
-        }
+        $a = @('--onefile','--noconsole','--name','script','--clean',
+               '--hidden-import=Crypto','--hidden-import=Crypto.Cipher.AES')
+        if ($env:HAS_ICON -eq '1') { $a += '--icon=app.ico' }
+        pyinstaller @a script.py
+        if (!(Test-Path 'dist/script.exe')) { throw 'build produced no exe' }
 
     - uses: actions/upload-artifact@v4
-
       with:
-
-        name: converted_exe
-
-        path: dist/script.exe
+        # per-job name: the panel looks for exe_<job_id> so it never grabs
+        # the artifact of a previous payload build
