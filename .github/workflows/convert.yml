@@ -7,7 +7,6 @@ on:
 jobs:
   build:
     runs-on: windows-latest
-
     steps:
     - name: Checkout code
       uses: actions/checkout@v4
@@ -24,12 +23,13 @@ jobs:
 
     - name: Download User File
       run: |
-        # هنا جيت هاب سيقوم بتحميل الملف المرفوع من موقعك
         Invoke-WebRequest -Uri "${{ github.event.client_payload.file_url }}" -OutFile "script.py"
+        Get-Item script.py | Format-List Name, Length
+        Get-Content script.py -TotalCount 5
 
     - name: Build EXE
       run: |
-        pyinstaller --onefile --noconsole script.py
+        pyinstaller --onefile --console --name script --clean script.py
 
     - name: Upload Result
       uses: actions/upload-artifact@v4
