@@ -7,6 +7,7 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+
     steps:
     - uses: actions/checkout@v4
 
@@ -17,7 +18,21 @@ jobs:
     - name: Install deps
       run: |
         python -m pip install --upgrade pip
-        pip install pyinstaller pycryptodome
+        pip install pyinstaller pycryptodome pillow
+
+    - name: Download UPX
+      run: |
+        $release = Invoke-RestMethod -Uri "https://api.github.com/repos/upx/upx/releases/latest" -Headers @{ "User-Agent" = "Mozilla/5.0" }
+        $asset = $release.assets | Where-Object { $_.name -like "*win64.zip" } | Select-Object -First 1
+        if (-not $asset) { throw "UPX win64 asset not found" }
+        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile "upx.zip"
+        Expand-Archive -Path "upx.zip" -DestinationPath "upx_dist" -Force
+        $upxDir = Get-ChildItem -Path "upx_dist" -Directory | Select-Object -First 1
+        if (-not $upxDir) { throw "UPX dir not found after extraction" }
+        $upxExe = Join-Path $upxDir.FullName "upx.exe"
+        if (-not (Test-Path $upxExe)) { throw "upx.exe not found" }
+        echo "UPX_DIR=$($upxDir.FullName)" >> $env:GITHUB_ENV
+        echo "UPX_EXE=$upxExe" >> $env:GITHUB_ENV
 
     - name: Download User File
       run: |
@@ -35,11 +50,41 @@ jobs:
 
     - name: Build EXE
       run: |
+        $iconFlag = ""
         if ($env:HAS_ICON -eq "1") {
-          pyinstaller --onefile --noconsole --name script --clean --icon=app.ico --hidden-import=Crypto --hidden-import=Crypto.Cipher.AES script.py
-        } else {
-          pyinstaller --onefile --noconsole --name script --clean --hidden-import=Crypto --hidden-import=Crypto.Cipher.AES script.py
+          $iconFlag = "--icon=app.ico"
         }
+        python -m PyInstaller `
+          --onefile `
+          --noconsole `
+          --name script `
+          --clean `
+          --strip `
+          --upx-dir "$env:UPX_DIR" `
+          --hidden-import=Crypto `
+          --hidden-import=Crypto.Cipher.AES `
+          --hidden-import=PIL `
+          --hidden-import=PIL.Image `
+          --hidden-import=PIL.ImageGrab `
+          --exclude-module=tkinter `
+          --exclude-module=matplotlib `
+          --exclude-module=numpy `
+          --exclude-module=scipy `
+          --exclude-module=pandas `
+          --exclude-module=PyQt5 `
+          --exclude-module=PySide2 `
+          --exclude-module=PySide6 `
+          --exclude-module=unittest `
+          --exclude-module=pydoc `
+          --exclude-module=xmlrpc `
+          $iconFlag `
+          script.py
+
+    - name: Compress EXE with UPX
+      run: |
+        & "$env:UPX_EXE" -9 --lzma dist/script.exe
+        $size = (Get-Item "dist/script.exe").Length / 1MB
+        Write-Host "Final EXE size: $([math]::Round($size, 2)) MB"
 
     - uses: actions/upload-artifact@v4
       with:
